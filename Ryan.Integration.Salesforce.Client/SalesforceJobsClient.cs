@@ -1,5 +1,9 @@
+using System.Collections;
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
+using CsvHelper;
 using Newtonsoft.Json;
 
 namespace Ryan.Integration.Salesforce.Client;
@@ -42,6 +46,26 @@ public sealed record SalesforceJobsClient
         return status;
     }
 
+    public async Task UploadJobBatch<T>(string jobId, T data)
+        where T : IEnumerable
+    {
+        var csv = await GetCsvData(data);
+        await UploadJobBatch(jobId, csv);
+    }
+
+    public async Task UploadJobBatch(string jobId, string csv)
+    {
+        var uri = $"/services/data/{_credentials.ApiVersion}/jobs/ingest/{jobId}/batches/";
+        var content = new StringContent(csv, Encoding.Default, "text/csv");
+        var httpClient = CreateHttpClient();
+
+        var response = await httpClient.PutAsync(uri, content);
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<JobStatus> StartJob(string jobId)
+        => await SetJobState(jobId, "UploadComplete");
+    
     public async Task<JobStatus> GetJobStatus(string jobId)
     {
         var uri = $"/services/data/{_credentials.ApiVersion}/jobs/ingest/{jobId}";
@@ -54,18 +78,7 @@ public sealed record SalesforceJobsClient
     }
 
     public async Task<JobStatus> AbortJob(string jobId)
-    {
-        var uri = $"/services/data/{_credentials.ApiVersion}/jobs/ingest/{jobId}";
-        var httpClient = CreateHttpClient();
-
-        var response = await httpClient.PatchAsJsonAsync(uri, new { state = "Aborted"} );
-        response.EnsureSuccessStatusCode();
-
-        var responseText = await response.Content.ReadAsStringAsync();
-        var status = JsonConvert.DeserializeObject<JobStatus>(responseText);
-
-        return status;
-    }
+        => await SetJobState(jobId, "Aborted");
 
     public async Task DeleteJob(string jobId)
     {
@@ -76,12 +89,36 @@ public sealed record SalesforceJobsClient
         response.EnsureSuccessStatusCode();
     }
 
+    private async Task<JobStatus> SetJobState(string jobId, string state)
+    {
+        var uri = $"/services/data/{_credentials.ApiVersion}/jobs/ingest/{jobId}";
+        var httpClient = CreateHttpClient();
+
+        var response = await httpClient.PatchAsJsonAsync(uri, new { state } );
+        response.EnsureSuccessStatusCode();
+
+        var responseText = await response.Content.ReadAsStringAsync();
+        var status = JsonConvert.DeserializeObject<JobStatus>(responseText);
+
+        return status;
+    }
+
     private HttpClient CreateHttpClient()
     {
         var httpClient = new HttpClient();
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _credentials.AccessToken);
         httpClient.BaseAddress = new Uri(_credentials.InstanceUrl);
         return httpClient;
+    }
+
+    private async Task<string> GetCsvData<T>(T data)
+        where T : IEnumerable
+    {
+        var stringBuilder = new StringBuilder();
+        await using var stringWriter = new StringWriter(stringBuilder);
+        await using var csvWriter = new CsvWriter(stringWriter, CultureInfo.InvariantCulture);
+        await csvWriter.WriteRecordsAsync(data);
+        return stringBuilder.ToString();
     }
     
     public record JobStatus(
@@ -100,6 +137,19 @@ public sealed record SalesforceJobsClient
 
 public static class SalesforceJobsClientExtensions
 {
+    public static async Task<SalesforceJobsClient.JobStatus> RunJob(
+        this SalesforceJobsClient client,
+        string typeName,
+        string keyField,
+        T data,
+        string contentType = "CSV",
+        string operation = "upsert",
+        string lineEnding = "CRLF"
+    )
+    {
+        
+    }
+    
     public static async Task AbortAndDeleteJob(this SalesforceJobsClient client, string jobId)
     {
         await client.AbortJob(jobId);
